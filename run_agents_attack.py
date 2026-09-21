@@ -17,7 +17,7 @@ def main():
 
     print(f"[+] Starting leader against {args.target_ip}...")
     leader_process = subprocess.Popen(
-        [python_exe, "leader_agent/leader.py", args.target_ip],
+        [python_exe, "-u", "leader_agent/leader.py", args.target_ip],
         stdout=subprocess.PIPE,
         text=True,
         bufsize=1

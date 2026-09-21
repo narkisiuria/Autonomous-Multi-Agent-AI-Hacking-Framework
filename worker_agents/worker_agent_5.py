@@ -36,7 +36,8 @@ class WorkerAgent:
             "task_complete": false
             }
             - Set task_complete to true ONLY when you have real evidence the task's goal (look_for) is fully satisfied. When true, "command" should be an empty string.
-            - Never wrap the JSON in markdown or backticks. Never add commentary outside the JSON object."""
+            - Never wrap the JSON in markdown or backticks. Never add commentary outside the JSON object.
+            - If leader tells to stop work since flags are found print the flags and indicate that the flags are found by printing them with echo <flag1>..."""
 
     def parse_leader_json(self, raw_leader_json):
         leader_json = json.loads(raw_leader_json)
@@ -64,13 +65,14 @@ class WorkerAgent:
         
         if response_dict["status"] == "successfuly initiolized":
             self.worker_id = response_dict["worker_id"]
-            print("successfuly initiolized")
+            print(f"[worker] successfully initialized as worker {self.worker_id}")
         
         else:
-            print("error initiolizing")
+            print("[worker] error initializing")
 
     def call_ai(self, system_prompt, user_content):
         try:
+            print(f"[worker {self.worker_id}] calling AI...")
             response = self.client.chat.completions.create(
                 model="openai/gpt-oss-120b",
                 messages=[
@@ -78,11 +80,11 @@ class WorkerAgent:
                     {"role": "user", "content": user_content}
                 ],
             )
-            
+            print(f"[worker {self.worker_id}] AI responded.")
             return response.choices[0].message.content
         
         except Exception as e:
-            print(f"Error communicating with Groq AI: {e}")
+            print(f"[worker {self.worker_id}] Error communicating with Groq AI: {e}")
             return None
     
     def read_until_prompt(self, proc):
@@ -105,7 +107,7 @@ class WorkerAgent:
             "foothold": foothold,
             "status": status
         }
-        
+        print(f"[worker {worker_id}] sending report: status={status}, cmd={command_ran}")
         conn.sendall(json.dumps(report).encode('utf-8'))
 
     def command_actually_failed(self, result):
@@ -128,13 +130,16 @@ class WorkerAgent:
         return echoed_command, output, prompt
     
     def wait_for_ack(self, conn):
+        print(f"[worker {self.worker_id}] waiting for ack...")
         wait_for_ack = conn.recv(8192)
         wait_for_ack_response = wait_for_ack.decode('utf-8')
         
         if wait_for_ack_response == "ack":
+            print(f"[worker {self.worker_id}] got ack.")
             return True
         
         else:
+            print(f"[worker {self.worker_id}] BAD ack, got: {wait_for_ack_response}")
             return False
 
 
@@ -153,6 +158,7 @@ if __name__ == "__main__":
     worker.send_init()
     
     while True:
+        print(f"[worker {worker.worker_id}] requesting new task...")
         msg = {
             "type": "ready for new task",
             "worker_id": worker.worker_id
@@ -161,6 +167,7 @@ if __name__ == "__main__":
         worker.sock.sendall(json.dumps(msg).encode("utf-8"))
         response = worker.sock.recv(8192).decode('utf-8')
         task = worker.parse_leader_json(response)
+        print(f"[worker {worker.worker_id}] received task: {task}")
 
         worker.sock.sendall("ack".encode("utf-8"))
         
@@ -171,6 +178,7 @@ if __name__ == "__main__":
             sys.exit(1)
 
         ai_task_output = json.loads(ai_raw)
+        print(f"[worker {worker.worker_id}] AI decided: {ai_task_output}")
 
         if ai_task_output["task_complete"]:
             worker.send_report(
@@ -189,6 +197,7 @@ if __name__ == "__main__":
         commands = command if isinstance(command, list) else [command]
 
         for cmd in commands:
+            print(f"[worker {worker.worker_id}] running: {cmd}")
             real_cmd = cmd + "; if [ $? -eq 0 ]; then echo PTAI_DONE_OK; else echo PTAI_DONE_FAIL; fi\n"
             proc.stdin.write(real_cmd)
             proc.stdin.flush()
@@ -197,6 +206,7 @@ if __name__ == "__main__":
             _, output, prompt = worker.parse_result(result)
             success = not worker.command_actually_failed(result)
             clean_output = "\n".join(l for l in output.strip().split("\n") if l.strip() not in ("PTAI_DONE_OK", "PTAI_DONE_FAIL"))
+            print(f"[worker {worker.worker_id}] output: {clean_output}")
 
             worker.session_history.append({"command": cmd, "output": clean_output, "success": success})
 

@@ -31,22 +31,27 @@ try:
             Your job: decide the next task for THAT specific worker only.
 
             Rules:
+            - always use non-interactive flags for tools that can prompt (e.g. mysql ... < /dev/null or ensure -p"$pass" is used correctly — actually the real bug here is -p"$pass" with an EMPTY string still
+            triggers a password prompt in some mysql client versions instead of "no password", depends on syntax).
             - Read every worker's reports carefully, not just the requesting worker's. Findings from one worker can and should inform tasks you give to another.
             - NEVER assign a task that duplicates work already done (by any worker) or a command that already failed with no new angle.
             - Prioritize investigating the most promising untried leads over repeating similar recon.
             - If a worker has already made strong progress (e.g. found a specific foothold) on the current stage, consider assigning the next logical stage instead of more of the same.
             - Respond with ONLY valid JSON, nothing else, in exactly this shape:
             {
+            "target_IP": "TARGET IP",
             "instructions": "clear, specific goal for this one task",
             "suggested_tools": ["tool1", "tool2", ...],
             "look_for": "what result or information matters for this task",
             "estimated_tasks_remaining": <int>,
             "stage": "enumeration / exploitation / privilege-escalation / post-exploitation"
             }
-            - Never wrap the JSON in markdown or backticks. Never add commentary outside the JSON object."""
-            
+            - Never wrap the JSON in markdown or backticks. Never add commentary outside the JSON object.
+            - When flag(s) are indeed found, tell the workers to stop with the regular format we gave you beforehand."""
+
         def call_ai(self, system_prompt, user_content):
             try:
+                print("[leader] calling Groq AI to decide next task...")
                 response = self.client.chat.completions.create(
                     model="openai/gpt-oss-120b",
                     messages=[
@@ -54,21 +59,24 @@ try:
                         {"role": "user", "content": user_content}
                     ],
                 )
-                
+                print("[leader] AI responded.")
                 return response.choices[0].message.content
             
             except Exception as e:
-                print(f"Error communicating with Groq AI: {e}")
+                print(f"[leader] Error communicating with Groq AI: {e}")
                 return None
         
         def wait_for_ack(self, conn):
+            print("[leader] waiting for ack...")
             wait_for_ack = conn.recv(8192)
             wait_for_ack_response = wait_for_ack.decode('utf-8')
             
             if wait_for_ack_response == "ack":
+                print("[leader] got ack.")
                 return True
             
             else:
+                print(f"[leader] BAD ack, got: {wait_for_ack_response}")
                 return False
             
         def send_leader_json(self, send_type, to, instructions, sugg_tools, look_for, estimated_tasks_till_done, stage):
@@ -86,8 +94,10 @@ try:
             conn.sendall(json.dumps(built_json).encode('utf-8')) 
         
         def run_initial_scan(self, target_ip):
-            command = f"sudo nmap -sV -sC --open -p- {target_ip}"
+            print(f"[leader] running initial nmap scan on {target_ip} (this can take a while)...")
+            command = f"nmap -sV -sC --open -p- {target_ip}"
             result = sp.run(command.split(), capture_output=True, text=True)
+            print("[leader] initial scan complete.")
             return result.stdout
         
         def handle_worker(self, conn, addr):
@@ -98,10 +108,12 @@ try:
                         rawDataFromClient = conn.recv(8192)
 
                         if not rawDataFromClient:
+                            print(f"[leader] connection closed by {addr}")
                             return
                         
                         dataFromClient = rawDataFromClient.decode('utf-8').strip()
                         dict_from_worker = json.loads(dataFromClient)
+                        print(f"[leader] received message type: {dict_from_worker.get('type')} from {addr}")
                         try:
                             worker_id = dict_from_worker["worker_id"] 
                         except KeyError:
@@ -133,6 +145,7 @@ try:
                             }
                             
                             conn.sendall(f"{json.dumps(response)}".encode("utf-8"))
+                            print(f"[leader] assigned id {self.connected_agents} to new worker")
                         
                         elif dict_from_worker["type"] == "report":
                             conn.sendall("ack".encode('utf-8'))
@@ -147,12 +160,15 @@ try:
                             self.workers[worker_id]["status"] = dict_from_worker["status"]
                             self.workers_no_conn[worker_id]["reports"].append(formated_report)
                             self.workers_no_conn[worker_id]["status"] = dict_from_worker["status"]
+                            print(f"[leader] worker {worker_id} reported: {dict_from_worker['status']} | cmd: {dict_from_worker.get('command_ran')}")
                             
                         elif dict_from_worker["type"] == "ready for new task":
+                            print(f"[leader] worker {worker_id} is ready for a new task, asking AI...")
                             worker_data = self.workers_no_conn[worker_id]
                             task = self.call_ai(self.leader_task_prompt, f"NMAP SCAN RESULTS START : {self.initial_scan_results} : NMAP SCAN RESULTS END. WORKERS STATES START : {self.workers_no_conn} : WORKERS STATES END. WORKER ASKING FOR TASK START : {worker_id}: {worker_data} : WORKER ASKING FOR TASK END.")
                             
                             if task:
+                                print(f"[leader] sending task to worker {worker_id}: {task}")
                                 conn.sendall(task.encode("utf-8"))
                                 if self.wait_for_ack(conn):
                                     continue
@@ -192,7 +208,6 @@ try:
     if __name__ == "__main__":
         server = LeaderServer()
         target_ip = sys.argv[1]
-        print("running initial network scan...")
         server.initial_scan_results = server.run_initial_scan(target_ip)
         server.start()
 
