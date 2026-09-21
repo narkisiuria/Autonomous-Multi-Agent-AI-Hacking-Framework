@@ -31,7 +31,7 @@ class WorkerAgent:
             {
             "reason": "one sentence on what you're doing and why",
             "command": "the shell command to run, or a list like [\"cmd1\", \"cmd2\"] for chaining",
-            "findings": "what you've learned so far, plain text",
+            "findings": "what you've learned/found so far, plain text",
             "foothold": "none / user / root",
             "task_complete": false
             }
@@ -153,11 +153,17 @@ if __name__ == "__main__":
     worker.send_init()
     
     while True:
-        msg = f"ready|{worker.worker_id}"
-        worker.sock.sendall(msg.encode("utf-8"))
+        msg = {
+            "type": "ready for new task",
+            "worker_id": worker.worker_id
+        }
+        
+        worker.sock.sendall(json.dumps(msg).encode("utf-8"))
         response = worker.sock.recv(8192).decode('utf-8')
         task = worker.parse_leader_json(response)
 
+        worker.sock.sendall("ack".encode("utf-8"))
+        
         user_content = f"Task: {json.dumps(task)}\nYour session history: {json.dumps(worker.session_history)}"
         ai_raw = worker.call_ai(worker.system_prompt, user_content)
 

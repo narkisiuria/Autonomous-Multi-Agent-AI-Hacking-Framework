@@ -191,7 +191,7 @@ try:
 
     if __name__ == "__main__":
         server = LeaderServer()
-        target_ip = input("Enter target IP: ")
+        target_ip = sys.argv[1]
         print("running initial network scan...")
         server.initial_scan_results = server.run_initial_scan(target_ip)
         server.start()
