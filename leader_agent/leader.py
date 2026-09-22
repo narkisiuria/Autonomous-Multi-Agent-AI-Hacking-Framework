@@ -35,6 +35,8 @@ try:
             triggers a password prompt in some mysql client versions instead of "no password", depends on syntax).
             - Read every worker's reports carefully, not just the requesting worker's. Findings from one worker can and should inform tasks you give to another.
             - NEVER assign a task that duplicates work already done (by any worker) or a command that already failed with no new angle.
+            - NEVER use a command that can prompt for interactive input (passwords, confirmations, y/n prompts). Always use non-interactive flags or redirect stdin from /dev/null
+            (e.g. command < /dev/null) for any tool that might prompt.
             - Prioritize investigating the most promising untried leads over repeating similar recon.
             - If a worker has already made strong progress (e.g. found a specific foothold) on the current stage, consider assigning the next logical stage instead of more of the same.
             - Respond with ONLY valid JSON, nothing else, in exactly this shape:
@@ -44,10 +46,12 @@ try:
             "suggested_tools": ["tool1", "tool2", ...],
             "look_for": "what result or information matters for this task",
             "estimated_tasks_remaining": <int>,
-            "stage": "enumeration / exploitation / privilege-escalation / post-exploitation"
+            "stage": "enumeration / exploitation / privilege-escalation / post-exploitation",
+            "status": ongoing / finished
             }
             - Never wrap the JSON in markdown or backticks. Never add commentary outside the JSON object.
-            - When flag(s) are indeed found, tell the workers to stop with the regular format we gave you beforehand."""
+            - If, based on all workers' findings so far, BOTH the user flag and root flag have been found, respond with EXACTLY
+            this instead of a task: {"status": "finished", "user_flag": "<flag>", "root_flag": "<flag>"}"""
 
         def call_ai(self, system_prompt, user_content):
             try:
@@ -120,23 +124,24 @@ try:
                             pass
                         
                         if dict_from_worker["type"] == "initiolization":
-                            self.connected_agents += 1
-                            self.workers[self.connected_agents] = {
-                                "conn": conn,
-                                "status": "intiolized",
-                                "current_task": None,
-                                "reports": [],
-                                "foothold": None,
-                                "rating": None
-                            }
-                            
-                            self.workers_no_conn[self.connected_agents] = {
-                                "status": "intiolized",
-                                "current_task": None,
-                                "reports": [],
-                                "foothold": None,
-                                "rating": None
-                            }
+                            with self.db_lock:
+                                self.connected_agents += 1
+                                self.workers[self.connected_agents] = {
+                                    "conn": conn,
+                                    "status": "intiolized",
+                                    "current_task": None,
+                                    "reports": [],
+                                    "foothold": None,
+                                    "rating": None
+                                }
+                                
+                                self.workers_no_conn[self.connected_agents] = {
+                                    "status": "intiolized",
+                                    "current_task": None,
+                                    "reports": [],
+                                    "foothold": None,
+                                    "rating": None
+                                }
                             
                             print(f"[*] agent connected. number of connected agents: {self.connected_agents}") 
                             response = {
@@ -148,39 +153,48 @@ try:
                             print(f"[leader] assigned id {self.connected_agents} to new worker")
                         
                         elif dict_from_worker["type"] == "report":
-                            conn.sendall("ack".encode('utf-8'))
-                            formated_report = {
-                                "task_instructions": dict_from_worker["task_instructions"],
-                                "command_ran": dict_from_worker["command_ran"],
-                                "findings": dict_from_worker["findings"],
-                                "foothold": dict_from_worker["foothold"]
-                            }
-                            
-                            self.workers[worker_id]["reports"].append(formated_report)
-                            self.workers[worker_id]["status"] = dict_from_worker["status"]
-                            self.workers_no_conn[worker_id]["reports"].append(formated_report)
-                            self.workers_no_conn[worker_id]["status"] = dict_from_worker["status"]
-                            print(f"[leader] worker {worker_id} reported: {dict_from_worker['status']} | cmd: {dict_from_worker.get('command_ran')}")
-                            
-                        elif dict_from_worker["type"] == "ready for new task":
-                            print(f"[leader] worker {worker_id} is ready for a new task, asking AI...")
-                            worker_data = self.workers_no_conn[worker_id]
-                            task = self.call_ai(self.leader_task_prompt, f"NMAP SCAN RESULTS START : {self.initial_scan_results} : NMAP SCAN RESULTS END. WORKERS STATES START : {self.workers_no_conn} : WORKERS STATES END. WORKER ASKING FOR TASK START : {worker_id}: {worker_data} : WORKER ASKING FOR TASK END.")
-                            
-                            if task:
-                                print(f"[leader] sending task to worker {worker_id}: {task}")
-                                conn.sendall(task.encode("utf-8"))
-                                if self.wait_for_ack(conn):
-                                    continue
+                            with self.db_lock:
+                                conn.sendall("ack".encode('utf-8'))
+                                formated_report = {
+                                    "task_instructions": dict_from_worker["task_instructions"],
+                                    "command_ran": dict_from_worker["command_ran"],
+                                    "findings": dict_from_worker["findings"],
+                                    "foothold": dict_from_worker["foothold"]
+                                }
                                 
-                                else:
-                                    sys.exit(1)
-                            
-                            else:
-                                sys.exit(1)
+                                self.workers[worker_id]["reports"].append(formated_report)
+                                self.workers[worker_id]["status"] = dict_from_worker["status"]
+                                self.workers_no_conn[worker_id]["reports"].append(formated_report)
+                                self.workers_no_conn[worker_id]["status"] = dict_from_worker["status"]
+                                print(f"[leader] worker {worker_id} reported: {dict_from_worker['status']} | cmd: {dict_from_worker.get('command_ran')}")
+                                
+                        elif dict_from_worker["type"] == "ready for new task":
+                            try:
+                                with self.db_lock:
+                                    print(f"[leader] worker {worker_id} is ready for a new task, asking AI...")
+                                    worker_data = self.workers_no_conn[worker_id]
+                                    task = self.call_ai(self.leader_task_prompt, f"NMAP SCAN RESULTS START : {self.initial_scan_results} : NMAP SCAN RESULTS END. WORKERS STATES START : {self.workers_no_conn} : WORKERS STATES END. WORKER ASKING FOR TASK START : {worker_id}: {worker_data} : WORKER ASKING FOR TASK END.")
+                                    
+                                    if task:
+                                        print(f"[leader] sending task to worker {worker_id}: {task}")
+                                        conn.sendall(task.encode("utf-8"))
+                                        if self.wait_for_ack(conn):
+                                            continue
+                                        else:
+                                            sys.exit(1)
+                                    else:
+                                        conn.sendall("emptyResponseError".encode("utf-8"))
+                                        continue
+                            except Exception as e:
+                                print(f"[leader] error handling task request for worker {worker_id}: {e}")
+                                try:
+                                    conn.sendall("emptyResponseError".encode("utf-8"))
+                                except Exception:
+                                    print(f"[leader] connection to worker {worker_id} is dead, cannot notify.")
+                                continue
             
-            except ConnectionAbortedError:
-                print("agent aborted the connection.")
+            except (ConnectionAbortedError, BrokenPipeError, ConnectionResetError):
+                print("agent disconnected.")
                 self.connected_agents -= 1
                 return
                                             

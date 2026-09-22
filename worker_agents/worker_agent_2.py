@@ -166,6 +166,15 @@ if __name__ == "__main__":
         
         worker.sock.sendall(json.dumps(msg).encode("utf-8"))
         response = worker.sock.recv(8192).decode('utf-8')
+        if response == "emptyResponseError":
+            print("got emptyResponseError from leader.")
+            time.sleep(5)
+            continue
+        
+        if json.loads(response)["status"] == "finished":
+            print("FINISHED WORKING ON SESSION: FOUND FLAGS")
+            sys.exit(0)
+        
         task = worker.parse_leader_json(response)
         print(f"[worker {worker.worker_id}] received task: {task}")
 
