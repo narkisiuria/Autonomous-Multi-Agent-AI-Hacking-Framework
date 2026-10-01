@@ -227,3 +227,8 @@ try:
 
 except KeyboardInterrupt:
     print("\n[+] KeyboardInterrupt! QUITTING...")
+except BrokenPipeError:
+    print("broken pipe error detected")
+    import time;time.sleep(5)
+except ModuleNotFoundError as e:
+    print(f"moudle missing: {e}")
