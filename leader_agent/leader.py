@@ -6,9 +6,44 @@ try:
     import threading
     import subprocess as sp
     import sys
+    import textwrap
     from dotenv import load_dotenv
     from groq import Groq
-    
+
+    # ANSI color codes
+    BLUE   = "\033[94m"
+    CYAN   = "\033[96m"
+    YELLOW = "\033[93m"
+    GREEN  = "\033[92m"
+    RESET  = "\033[0m"
+
+    STAGE_ICONS = {
+        "recon":                "🔍",
+        "enumeration":          "📡",
+        "exploitation":         "💥",
+        "privilege-escalation": "⬆️",
+        "post-exploitation":    "🏴",
+        "reporting":            "📝",
+    }
+
+
+    def leader_print(msg):
+        """Print leader AI messages in blue."""
+        print(f"{BLUE}{msg}{RESET}")
+
+
+    def print_stage_banner(stage, worker_id, instructions=""):
+        """Print a prominent stage banner for the leader dispatching a task."""
+        icon = STAGE_ICONS.get(stage, "•")
+        bar = "═" * 64
+        print(f"{CYAN}{bar}{RESET}")
+        print(f"{CYAN}{icon}  LEADER → WORKER {worker_id}  |  STAGE: {str(stage).upper()}{RESET}")
+        if instructions:
+            for line in textwrap.wrap(instructions, width=60):
+                print(f"{CYAN}   {line}{RESET}")
+        print(f"{CYAN}{bar}{RESET}")
+
+
     class LeaderServer:
         def __init__(self, host='127.0.0.1', port=9999):
             load_dotenv()
@@ -16,12 +51,14 @@ try:
             self.client = Groq(api_key=self.api_key)
             self.host = host
             self.port = port
-            self.db_lock = threading.Lock() 
+            self.db_lock = threading.Lock()
             self.connected_agents = 0
             self.workers = {}
             self.initial_scan_results = None
             self.workers_no_conn = {}
-            self.leader_task_prompt = """You are the leader AI coordinating
+            self.current_stage = None
+            self.tasks_dispatched = 0
+            self.leader_task_prompt = r"""You are the leader AI coordinating
             a team of autonomous penetration testing worker agents on Kali Linux, working together against a single target.
             You will be given:
             - The initial nmap scan results for the target
@@ -31,7 +68,7 @@ try:
             Your job: decide the next task for THAT specific worker only.
 
             Rules:
-            - always use non-interactive flags for tools that can prompt (e.g. mysql ... < /dev/null or ensure -p"$pass" is used correctly — actually the real bug here is -p"$pass" with an EMPTY string still
+            - always use non-interactive flags for tools that can prompt (e.g. mysql ... < /dev/null or ensure -p"\$pass" is used correctly — actually the real bug here is -p"\$pass" with an EMPTY string still
             triggers a password prompt in some mysql client versions instead of "no password", depends on syntax).
             - Read every worker's reports carefully, not just the requesting worker's. Findings from one worker can and should inform tasks you give to another.
             - NEVER assign a task that duplicates work already done (by any worker) or a command that already failed with no new angle.
@@ -39,6 +76,26 @@ try:
             (e.g. command < /dev/null) for any tool that might prompt.
             - Prioritize investigating the most promising untried leads over repeating similar recon.
             - If a worker has already made strong progress (e.g. found a specific foothold) on the current stage, consider assigning the next logical stage instead of more of the same.
+            - Engagement Artifacts Storage & Lifecycle Review
+            When generating, updating, or reviewing any tool outputs, logs, scans, scripts, or final report drafts, you must strictly organize them under the parent directory `Engagement_Artifacts/`. Under no circumstances should files be dumped in the project root. 
+
+            You must map each specific phase of your hacking lifecycle to its designated subfolder exactly as structured below:
+
+            *   📂 `Engagement_Artifacts/` (Main wrapper folder)
+                *   📁 `recon_stage/`          -> All passive/active information gathering, OSINT, and initial discovery logs.
+                *   📁 `enum_stage/`           -> Port scans, service probing, directory fuzzing, and user/share enumeration outputs.
+                *   📁 `vuln_analysis/`        -> Vulnerability scanner outputs (Nessus/Nuclei), CVE research, and flaw prioritization.
+                *   📁 `Exploitation/`         -> Proof-of-concept (PoC) scripts, reverse shell logs, and initial access execution artifacts.
+                *   📁 `Post-Exploitation:/`    -> Privilege escalation scripts, credential dumps, Active Directory mapping, and lateral movement history.
+                *   📁 `reporting/`            -> Executive summaries, technical markdown drafts, and final vulnerability reporting files.
+
+            Before writing or executing a command that pipes output to a file (e.g., nmap, gobuster, or custom python scripts), you must:
+            1. Identify the current active lifecycle phase.
+            2. Format the target file path to explicitly route into the correct subfolder (Example: `Engagement_Artifacts/enum_stage/nmap_results.txt`).
+            3. Ensure the folder exists before creating files within it.
+
+            Whenever the user asks you to "review files," "analyze findings," or "check progress," you must comprehensively inspect the contents of the relevant subfolder(s). Do not rely on memory. You must read the artifact logs directly from the respective `Engagement_Artifacts/` sub-stage directory to form your context, identify missing gaps, and decide on the next logical penetration testing action item.
+                        
             - Respond with ONLY valid JSON, nothing else, in exactly this shape:
             {
             "target_IP": "TARGET IP",
@@ -47,15 +104,16 @@ try:
             "look_for": "what result or information matters for this task",
             "estimated_tasks_remaining": <int>,
             "stage": "enumeration / exploitation / privilege-escalation / post-exploitation",
-            "status": ongoing / finished
+            "status": "ongoing"
             }
             - Never wrap the JSON in markdown or backticks. Never add commentary outside the JSON object.
             - If, based on all workers' findings so far, BOTH the user flag and root flag have been found, respond with EXACTLY
             this instead of a task: {"status": "finished", "user_flag": "<flag>", "root_flag": "<flag>"}"""
 
+
         def call_ai(self, system_prompt, user_content):
             try:
-                print("[leader] calling Groq AI to decide next task...")
+                leader_print("[leader] calling Groq AI to decide next task...")
                 response = self.client.chat.completions.create(
                     model="openai/gpt-oss-120b",
                     messages=[
@@ -63,26 +121,26 @@ try:
                         {"role": "user", "content": user_content}
                     ],
                 )
-                print("[leader] AI responded.")
+                leader_print("[leader] AI responded.")
                 return response.choices[0].message.content
-            
+
             except Exception as e:
-                print(f"[leader] Error communicating with Groq AI: {e}")
+                leader_print(f"[leader] Error communicating with Groq AI: {e}")
                 return None
-        
+
         def wait_for_ack(self, conn):
-            print("[leader] waiting for ack...")
+            leader_print("[leader] waiting for ack...")
             wait_for_ack = conn.recv(8192)
             wait_for_ack_response = wait_for_ack.decode('utf-8')
-            
+
             if wait_for_ack_response == "ack":
-                print("[leader] got ack.")
+                leader_print("[leader] got ack.")
                 return True
-            
+
             else:
-                print(f"[leader] BAD ack, got: {wait_for_ack_response}")
+                leader_print(f"[leader] BAD ack, got: {wait_for_ack_response}")
                 return False
-            
+
         def send_leader_json(self, send_type, to, instructions, sugg_tools, look_for, estimated_tasks_till_done, stage):
             built_json =  {
                 "type": send_type,
@@ -93,17 +151,18 @@ try:
                 "estimated_tasks_remaining": estimated_tasks_till_done,
                 "stage": stage
             }
-            
+
             conn = self.workers[to]["conn"]
-            conn.sendall(json.dumps(built_json).encode('utf-8')) 
-        
+            conn.sendall(json.dumps(built_json).encode('utf-8'))
+
         def run_initial_scan(self, target_ip):
-            print(f"[leader] running initial nmap scan on {target_ip} (this can take a while)...")
+            leader_print(f"[leader] running initial nmap scan on {target_ip} (this can take a while)...")
             command = f"nmap -sV -sC --open -p- {target_ip}"
+            print(f"running: {command}")
             result = sp.run(command.split(), capture_output=True, text=True)
-            print("[leader] initial scan complete.")
+            leader_print("[leader] initial scan complete.")
             return result.stdout
-        
+
         def handle_worker(self, conn, addr):
             try:
                 print(f"[+] New connection from agent: {addr}")
@@ -112,17 +171,17 @@ try:
                         rawDataFromClient = conn.recv(8192)
 
                         if not rawDataFromClient:
-                            print(f"[leader] connection closed by {addr}")
+                            leader_print(f"[leader] connection closed by {addr}")
                             return
-                        
+
                         dataFromClient = rawDataFromClient.decode('utf-8').strip()
                         dict_from_worker = json.loads(dataFromClient)
-                        print(f"[leader] received message type: {dict_from_worker.get('type')} from {addr}")
+                        leader_print(f"[leader] received message type: {dict_from_worker.get('type')} from {addr}")
                         try:
-                            worker_id = dict_from_worker["worker_id"] 
+                            worker_id = dict_from_worker["worker_id"]
                         except KeyError:
                             pass
-                        
+
                         if dict_from_worker["type"] == "initiolization":
                             with self.db_lock:
                                 self.connected_agents += 1
@@ -134,7 +193,7 @@ try:
                                     "foothold": None,
                                     "rating": None
                                 }
-                                
+
                                 self.workers_no_conn[self.connected_agents] = {
                                     "status": "intiolized",
                                     "current_task": None,
@@ -142,16 +201,19 @@ try:
                                     "foothold": None,
                                     "rating": None
                                 }
-                            
-                            print(f"[*] agent connected. number of connected agents: {self.connected_agents}") 
+
+                            print(f"[*] agent connected. number of connected agents: {self.connected_agents}")
                             response = {
                                 "status": "successfuly initiolized",
                                 "worker_id": self.connected_agents
                             }
-                            
+
                             conn.sendall(f"{json.dumps(response)}".encode("utf-8"))
-                            print(f"[leader] assigned id {self.connected_agents} to new worker")
-                        
+                            leader_print(
+                                f"[leader] assigned id {self.connected_agents} to new worker "
+                                f"(team current stage: {self.current_stage or 'not started'})"
+                            )
+
                         elif dict_from_worker["type"] == "report":
                             with self.db_lock:
                                 conn.sendall("ack".encode('utf-8'))
@@ -161,22 +223,73 @@ try:
                                     "findings": dict_from_worker["findings"],
                                     "foothold": dict_from_worker["foothold"]
                                 }
-                                
+
                                 self.workers[worker_id]["reports"].append(formated_report)
                                 self.workers[worker_id]["status"] = dict_from_worker["status"]
                                 self.workers_no_conn[worker_id]["reports"].append(formated_report)
                                 self.workers_no_conn[worker_id]["status"] = dict_from_worker["status"]
-                                print(f"[leader] worker {worker_id} reported: {dict_from_worker['status']} | cmd: {dict_from_worker.get('command_ran')}")
-                                
+                                leader_print(
+                                    f"[leader] worker {worker_id} reported: {dict_from_worker['status']} "
+                                    f"| stage={self.current_stage or 'unknown'} "
+                                    f"| cmd: {dict_from_worker.get('command_ran')}"
+                                )
+
                         elif dict_from_worker["type"] == "ready for new task":
                             try:
                                 with self.db_lock:
-                                    print(f"[leader] worker {worker_id} is ready for a new task, asking AI...")
+                                    leader_print(
+                                        f"[leader] worker {worker_id} is ready for a new task "
+                                        f"(current stage: {self.current_stage or 'not started'}), asking AI..."
+                                    )
                                     worker_data = self.workers_no_conn[worker_id]
                                     task = self.call_ai(self.leader_task_prompt, f"NMAP SCAN RESULTS START : {self.initial_scan_results} : NMAP SCAN RESULTS END. WORKERS STATES START : {self.workers_no_conn} : WORKERS STATES END. WORKER ASKING FOR TASK START : {worker_id}: {worker_data} : WORKER ASKING FOR TASK END.")
-                                    
+
                                     if task:
-                                        print(f"[leader] sending task to worker {worker_id}: {task}")
+                                        # Parse the leader AI's JSON to extract stage info for display
+                                        try:
+                                            task_dict = json.loads(task)
+                                        except Exception:
+                                            task_dict = {}
+
+                                        # Handle the finished state specially
+                                        if task_dict.get("status") == "finished":
+                                            print(f"{GREEN}╔{'═' * 62}╗{RESET}")
+                                            print(f"{GREEN}║  🏁  ENGAGEMENT FINISHED — BOTH FLAGS FOUND{' ' * 20}║{RESET}")
+                                            print(f"{GREEN}║  user_flag: {str(task_dict.get('user_flag', '?')):<50}║{RESET}")
+                                            print(f"{GREEN}║  root_flag: {str(task_dict.get('root_flag', '?')):<50}║{RESET}")
+                                            print(f"{GREEN}╚{'═' * 62}╝{RESET}")
+                                            conn.sendall(task.encode("utf-8"))
+                                            if self.wait_for_ack(conn):
+                                                continue
+                                            else:
+                                                sys.exit(1)
+
+                                        new_stage = task_dict.get("stage", "unknown")
+
+                                        # Announce stage transitions
+                                        if new_stage != self.current_stage:
+                                            if self.current_stage is not None:
+                                                print(
+                                                    f"{YELLOW}▶ STAGE TRANSITION: "
+                                                    f"{self.current_stage} → {new_stage}{RESET}"
+                                                )
+                                            self.current_stage = new_stage
+
+                                        self.tasks_dispatched += 1
+
+                                        # Big readable stage banner
+                                        print_stage_banner(
+                                            new_stage,
+                                            worker_id,
+                                            task_dict.get("instructions", "")
+                                        )
+
+                                        leader_print(
+                                            f"[leader] dispatching task #{self.tasks_dispatched} "
+                                            f"to worker {worker_id} "
+                                            f"(est. remaining: {task_dict.get('estimated_tasks_remaining', '?')})"
+                                        )
+                                        leader_print(f"[leader] sending task to worker {worker_id}: {task}")
                                         conn.sendall(task.encode("utf-8"))
                                         if self.wait_for_ack(conn):
                                             continue
@@ -186,36 +299,36 @@ try:
                                         conn.sendall("emptyResponseError".encode("utf-8"))
                                         continue
                             except Exception as e:
-                                print(f"[leader] error handling task request for worker {worker_id}: {e}")
+                                leader_print(f"[leader] error handling task request for worker {worker_id}: {e}")
                                 try:
                                     conn.sendall("emptyResponseError".encode("utf-8"))
                                 except Exception:
-                                    print(f"[leader] connection to worker {worker_id} is dead, cannot notify.")
+                                    leader_print(f"[leader] connection to worker {worker_id} is dead, cannot notify.")
                                 continue
-            
+
             except (ConnectionAbortedError, BrokenPipeError, ConnectionResetError):
                 print("agent disconnected.")
                 self.connected_agents -= 1
                 return
-                                            
+
         def start(self):
             context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             print("opening server key and crt")
-            context.load_cert_chain("keys/server.crt", "keys/server.key") 
-            
+            context.load_cert_chain("keys/server.crt", "keys/server.key")
+
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 s.bind((self.host, self.port))
                 s.listen()
                 os.system("cls" if os.name == "nt" else "clear")
                 print(f"[+] Server is listening on port: '{self.port}'")
-                
+
                 with context.wrap_socket(s, server_side=True) as ss:
                     while True:
                         try:
                             conn, addr = ss.accept()
                             client_thread = threading.Thread(target=self.handle_worker, args=(conn, addr))
                             client_thread.start()
-                            
+
                         except Exception as e:
                             print(f"[-] Error accepting connection: {e}")
 

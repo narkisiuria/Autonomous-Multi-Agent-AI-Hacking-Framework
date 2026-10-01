@@ -9,6 +9,16 @@ import json
 import socket
 import ssl
 
+# ANSI color codes
+PURPLE = "\033[95m"
+RESET = "\033[0m"
+
+
+def worker_print(msg):
+    """Print worker AI messages in purple."""
+    print(f"{PURPLE}{msg}{RESET}")
+
+
 class WorkerAgent:
     def __init__(self, worker_id, host='127.0.0.1', port=9999):
         self.worker_id = worker_id
@@ -19,7 +29,7 @@ class WorkerAgent:
         load_dotenv()
         self.api_key = os.getenv("GROQ_API_KEY")
         self.client = Groq(api_key=self.api_key)
-        self.system_prompt = """You are an autonomous penetration testing worker agent running on Kali Linux, operating as part of a multi-agent team led by a coordinating leader AI.
+        self.system_prompt = r"""You are an autonomous penetration testing worker agent running on Kali Linux, operating as part of a multi-agent team led by a coordinating leader AI.
             You will be given, for each task: instructions, suggested_tools, look_for, stage, and your own session history (past commands/outputs).
 
             Your job: decide the SINGLE next command (or a chain) that makes real progress on the current task.
@@ -37,6 +47,27 @@ class WorkerAgent:
             }
             - Set task_complete to true ONLY when you have real evidence the task's goal (look_for) is fully satisfied. When true, "command" should be an empty string.
             - Never wrap the JSON in markdown or backticks. Never add commentary outside the JSON object.
+
+            - Engagement Artifacts Storage & Lifecycle Review
+            When generating, updating, or reviewing any tool outputs, logs, scans, scripts, or final report drafts, you must strictly organize them under the parent directory `Engagement_Artifacts/`. Under no circumstances should files be dumped in the project root. 
+
+            You must map each specific phase of your hacking lifecycle to its designated subfolder exactly as structured below:
+
+            *   📂 `Engagement_Artifacts/` (Main wrapper folder)
+                *   📁 `recon_stage/`          -> All passive/active information gathering, OSINT, and initial discovery logs.
+                *   📁 `enum_stage/`           -> Port scans, service probing, directory fuzzing, and user/share enumeration outputs.
+                *   📁 `vuln_analysis/`        -> Vulnerability scanner outputs (Nessus/Nuclei), CVE research, and flaw prioritization.
+                *   📁 `Exploitation/`         -> Proof-of-concept (PoC) scripts, reverse shell logs, and initial access execution artifacts.
+                *   📁 `Post-Exploitation:/`    -> Privilege escalation scripts, credential dumps, Active Directory mapping, and lateral movement history.
+                *   📁 `reporting/`            -> Executive summaries, technical markdown drafts, and final vulnerability reporting files.
+
+            Before writing or executing a command that pipes output to a file (e.g., nmap, gobuster, or custom python scripts), you must:
+            1. Identify the current active lifecycle phase.
+            2. Format the target file path to explicitly route into the correct subfolder (Example: `Engagement_Artifacts/enum_stage/nmap_results.txt`).
+            3. Ensure the folder exists before creating files within it.
+
+            Whenever the user asks you to "review files," "analyze findings," or "check progress," you must comprehensively inspect the contents of the relevant subfolder(s). Do not rely on memory. You must read the artifact logs directly from the respective `Engagement_Artifacts/` sub-stage directory to form your context, identify missing gaps, and decide on the next logical penetration testing action item.
+                        
             - If leader tells to stop work since flags are found print the flags and indicate that the flags are found by printing them with echo <flag1>..."""
 
     def parse_leader_json(self, raw_leader_json):
@@ -65,14 +96,14 @@ class WorkerAgent:
         
         if response_dict["status"] == "successfuly initiolized":
             self.worker_id = response_dict["worker_id"]
-            print(f"[worker] successfully initialized as worker {self.worker_id}")
+            worker_print(f"[worker] successfully initialized as worker {self.worker_id}")
         
         else:
-            print("[worker] error initializing")
+            worker_print("[worker] error initializing")
 
     def call_ai(self, system_prompt, user_content):
         try:
-            print(f"[worker {self.worker_id}] calling AI...")
+            worker_print(f"[worker {self.worker_id}] calling AI...")
             response = self.client.chat.completions.create(
                 model="openai/gpt-oss-120b",
                 messages=[
@@ -80,11 +111,11 @@ class WorkerAgent:
                     {"role": "user", "content": user_content}
                 ],
             )
-            print(f"[worker {self.worker_id}] AI responded.")
+            worker_print(f"[worker {self.worker_id}] AI responded.")
             return response.choices[0].message.content
         
         except Exception as e:
-            print(f"[worker {self.worker_id}] Error communicating with Groq AI: {e}")
+            worker_print(f"[worker {self.worker_id}] Error communicating with Groq AI: {e}")
             return None
     
     def read_until_prompt(self, proc):
@@ -107,7 +138,7 @@ class WorkerAgent:
             "foothold": foothold,
             "status": status
         }
-        print(f"[worker {worker_id}] sending report: status={status}, cmd={command_ran}")
+        worker_print(f"[worker {worker_id}] sending report: status={status}, cmd={command_ran}")
         conn.sendall(json.dumps(report).encode('utf-8'))
 
     def command_actually_failed(self, result):
@@ -130,16 +161,16 @@ class WorkerAgent:
         return echoed_command, output, prompt
     
     def wait_for_ack(self, conn):
-        print(f"[worker {self.worker_id}] waiting for ack...")
+        worker_print(f"[worker {self.worker_id}] waiting for ack...")
         wait_for_ack = conn.recv(8192)
         wait_for_ack_response = wait_for_ack.decode('utf-8')
         
         if wait_for_ack_response == "ack":
-            print(f"[worker {self.worker_id}] got ack.")
+            worker_print(f"[worker {self.worker_id}] got ack.")
             return True
         
         else:
-            print(f"[worker {self.worker_id}] BAD ack, got: {wait_for_ack_response}")
+            worker_print(f"[worker {self.worker_id}] BAD ack, got: {wait_for_ack_response}")
             return False
 
 
@@ -158,7 +189,7 @@ if __name__ == "__main__":
     worker.send_init()
     
     while True:
-        print(f"[worker {worker.worker_id}] requesting new task...")
+        worker_print(f"[worker {worker.worker_id}] requesting new task...")
         msg = {
             "type": "ready for new task",
             "worker_id": worker.worker_id
@@ -166,17 +197,22 @@ if __name__ == "__main__":
         
         worker.sock.sendall(json.dumps(msg).encode("utf-8"))
         response = worker.sock.recv(8192).decode('utf-8')
+        
+        if not response:
+            worker_print("[worker] leader disconnected or sent nothing. exiting.")
+            sys.exit(1)
+
         if response == "emptyResponseError":
-            print("got emptyResponseError from leader.")
+            worker_print("got emptyResponseError from leader.")
             time.sleep(5)
             continue
         
         if json.loads(response)["status"] == "finished":
-            print("FINISHED WORKING ON SESSION: FOUND FLAGS")
+            worker_print("FINISHED WORKING ON SESSION: FOUND FLAGS")
             sys.exit(0)
         
         task = worker.parse_leader_json(response)
-        print(f"[worker {worker.worker_id}] received task: {task}")
+        worker_print(f"[worker {worker.worker_id}] received task: {task}")
 
         worker.sock.sendall("ack".encode("utf-8"))
         
@@ -187,7 +223,7 @@ if __name__ == "__main__":
             sys.exit(1)
 
         ai_task_output = json.loads(ai_raw)
-        print(f"[worker {worker.worker_id}] AI decided: {ai_task_output}")
+        worker_print(f"[worker {worker.worker_id}] AI decided: {ai_task_output}")
 
         if ai_task_output["task_complete"]:
             worker.send_report(
@@ -206,7 +242,7 @@ if __name__ == "__main__":
         commands = command if isinstance(command, list) else [command]
 
         for cmd in commands:
-            print(f"[worker {worker.worker_id}] running: {cmd}")
+            worker_print(f"[worker {worker.worker_id}] running: {cmd}")
             real_cmd = cmd + "; if [ $? -eq 0 ]; then echo PTAI_DONE_OK; else echo PTAI_DONE_FAIL; fi\n"
             proc.stdin.write(real_cmd)
             proc.stdin.flush()
@@ -215,7 +251,7 @@ if __name__ == "__main__":
             _, output, prompt = worker.parse_result(result)
             success = not worker.command_actually_failed(result)
             clean_output = "\n".join(l for l in output.strip().split("\n") if l.strip() not in ("PTAI_DONE_OK", "PTAI_DONE_FAIL"))
-            print(f"[worker {worker.worker_id}] output: {clean_output}")
+            worker_print(f"[worker {worker.worker_id}] output: {clean_output}")
 
             worker.session_history.append({"command": cmd, "output": clean_output, "success": success})
 
