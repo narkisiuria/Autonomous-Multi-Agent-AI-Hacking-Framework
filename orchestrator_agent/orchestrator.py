@@ -10,7 +10,6 @@ try:
     from dotenv import load_dotenv
     from groq import Groq
 
-    # ANSI color codes
     BLUE   = "\033[94m"
     CYAN   = "\033[96m"
     YELLOW = "\033[93m"
@@ -28,12 +27,10 @@ try:
 
 
     def leader_print(msg):
-        """Print leader AI messages in blue."""
         print(f"{BLUE}{msg}{RESET}")
 
 
     def print_stage_banner(stage, worker_id, instructions=""):
-        """Print a prominent stage banner for the leader dispatching a task."""
         icon = STAGE_ICONS.get(stage, "•")
         bar = "═" * 64
         print(f"{CYAN}{bar}{RESET}")
