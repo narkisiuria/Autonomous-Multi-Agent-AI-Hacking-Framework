@@ -9,7 +9,7 @@ def main():
     parser.add_argument("--worker-num", type=int, required=True, help="Number of worker agents to spawn")
     args = parser.parse_args()
     
-    if args.worker_num > 5:
+    if args.worker_num > 5: 
         print(f"max --worker-num is 5. you demanded: {args.worker_num}")
         sys.exit(1)
         

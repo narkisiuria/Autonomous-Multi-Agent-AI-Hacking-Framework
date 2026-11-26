@@ -26,8 +26,17 @@ class WorkerAgent:
         self.sock = None
         self.session_history = []
         load_dotenv()
-        self.api_key = os.getenv("GROQ_API_KEY")
-        self.client = Groq(api_key=self.api_key)
+        self.api_keys = []
+        for key_name in ["GROQ_API_KEY", "GROQ_API_KEY2", "GROQ_API_KEY3"]:
+            key = os.getenv(key_name)
+            if key:
+                self.api_keys.append(key)
+        
+        if not self.api_keys:
+            raise ValueError("No GROQ API keys found in .env")
+            
+        self.current_key_index = 0
+        self.client = Groq(api_key=self.api_keys[self.current_key_index])
         self.system_prompt = r"""You are an autonomous penetration testing worker agent running on Kali Linux, operating as part of a multi-agent team led by a coordinating leader AI.
             You will be given, for each task: instructions, suggested_tools, look_for, stage, and your own session history (past commands/outputs).
 
@@ -87,6 +96,64 @@ class WorkerAgent:
                         
             - If leader tells to stop work since flags are found print the flags and indicate that the flags are found by printing them with echo <flag1>..."""
 
+    def recv_full_message(self, conn):
+        """Reads from socket until a complete JSON object is received."""
+        buffer = ""
+        while True:
+            try:
+                chunk = conn.recv(8192).decode('utf-8')
+                if not chunk:
+                    return ""
+                buffer += chunk
+                
+                if buffer.strip() in ("emptyResponseError", "ack"):
+                    return buffer.strip()
+                
+                try:
+                    json.loads(buffer)
+                    return buffer
+                except json.JSONDecodeError:
+                    continue
+            except Exception:
+                return ""
+    
+    def rotate_key(self):
+        """Swaps to the next available API key."""
+        self.current_key_index = (self.current_key_index + 1) % len(self.api_keys)
+        self.client = Groq(api_key=self.api_keys[self.current_key_index])
+        worker_print(f"[worker {self.worker_id}] 🔄 Swapped to API key index {self.current_key_index + 1}/{len(self.api_keys)}")
+
+    def call_ai(self, system_prompt, user_content):
+        max_retries = len(self.api_keys)
+        
+        for attempt in range(max_retries):
+            try:
+                worker_print(f"[worker {self.worker_id}] calling AI (Key #{self.current_key_index + 1})...")
+                response = self.client.chat.completions.create(
+                    model="openai/gpt-oss-120b",
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_content}
+                    ],
+                )
+                worker_print(f"[worker {self.worker_id}] AI responded.")
+                return response.choices[0].message.content
+            
+            except Exception as e:
+                error_msg = str(e).lower()
+                # Check for Rate Limit / Quota / Auth errors
+                if "429" in error_msg or "rate limit" in error_msg or "quota" in error_msg or "invalid api key" in error_msg:
+                    worker_print(f"[worker {self.worker_id}] ⚠️ API Error: {e}")
+                    if attempt < max_retries - 1:
+                        self.rotate_key()
+                        time.sleep(1) # Brief pause before retrying
+                    else:
+                        worker_print(f"[worker {self.worker_id}] ❌ All API keys exhausted.")
+                        return None
+                else:
+                    worker_print(f"[worker {self.worker_id}] Error communicating with Groq AI: {e}")
+                    return None
+    
     def parse_leader_json(self, raw_leader_json):
         leader_json = json.loads(raw_leader_json)
         return leader_json
@@ -117,23 +184,6 @@ class WorkerAgent:
         
         else:
             worker_print("[worker] error initializing")
-
-    def call_ai(self, system_prompt, user_content):
-        try:
-            worker_print(f"[worker {self.worker_id}] calling AI...")
-            response = self.client.chat.completions.create(
-                model="openai/gpt-oss-120b",
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_content}
-                ],
-            )
-            worker_print(f"[worker {self.worker_id}] AI responded.")
-            return response.choices[0].message.content
-        
-        except Exception as e:
-            worker_print(f"[worker {self.worker_id}] Error communicating with Groq AI: {e}")
-            return None
     
     def read_until_prompt(self, proc):
         output = ""
@@ -179,15 +229,12 @@ class WorkerAgent:
     
     def wait_for_ack(self, conn):
         worker_print(f"[worker {self.worker_id}] waiting for ack...")
-        wait_for_ack = conn.recv(8192)
-        wait_for_ack_response = wait_for_ack.decode('utf-8')
-        
-        if wait_for_ack_response == "ack":
+        response = self.recv_full_message(conn)
+        if response == "ack":
             worker_print(f"[worker {self.worker_id}] got ack.")
             return True
-        
         else:
-            worker_print(f"[worker {self.worker_id}] BAD ack, got: {wait_for_ack_response}")
+            worker_print(f"[worker {self.worker_id}] BAD ack, got: {response}")
             return False
 
 
@@ -213,7 +260,9 @@ if __name__ == "__main__":
         }
         
         worker.sock.sendall(json.dumps(msg).encode("utf-8"))
-        response = worker.sock.recv(8192).decode('utf-8')
+        
+        # Use the robust reader
+        response = worker.recv_full_message(worker.sock)
         
         if not response:
             worker_print("[worker] leader disconnected or sent nothing. exiting.")
@@ -224,11 +273,20 @@ if __name__ == "__main__":
             time.sleep(5)
             continue
         
-        if json.loads(response)["status"] == "finished":
+        # SAFELY parse the response
+        try:
+            resp_dict = json.loads(response)
+            
+        except json.JSONDecodeError:
+            worker_print(f"[worker] Leader sent invalid JSON. Retrying... (Got: {response[:50]}...)")
+            time.sleep(2)
+            continue
+        
+        if resp_dict.get("status") == "finished":
             worker_print("FINISHED WORKING ON SESSION: FOUND FLAGS")
             sys.exit(0)
         
-        task = worker.parse_leader_json(response)
+        task = resp_dict
         worker_print(f"[worker {worker.worker_id}] received task: {task}")
 
         worker.sock.sendall("ack".encode("utf-8"))
@@ -237,7 +295,9 @@ if __name__ == "__main__":
         ai_raw = worker.call_ai(worker.system_prompt, user_content)
 
         if not ai_raw:
-            sys.exit(1)
+            worker_print(f"[worker {worker.worker_id}] ❌ All API keys exhausted. Sleeping for 15 seconds before retrying...")
+            time.sleep(15)
+            continue
 
         ai_task_output = json.loads(ai_raw)
         worker_print(f"[worker {worker.worker_id}] AI decided: {ai_task_output}")
